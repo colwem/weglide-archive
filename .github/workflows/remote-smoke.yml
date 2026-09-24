@@ -1,0 +1,42 @@
+name: Remote collector smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weglide-remote-smoke
+  cancel-in-progress: false
+
+jobs:
+  collect-one-flight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Collect one known North American flight through a virtual display
+        run: >-
+          xvfb-run -a python weglide_archive.py collect
+          --start-date 2026-09-23 --stop-date 2026-09-23
+          --max-flights 1 --visible
+          --output remote_test_archive --profile remote_test_profile
+          --min-delay 5 --max-delay 10
+      - name: Verify downloaded JSON, CSV, and SQLite index
+        run: python verify_archive.py --output remote_test_archive --minimum-flights 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: remote-smoke-result
+          path: |
+            remote_test_archive/
+          retention-days: 3
+          if-no-files-found: warn
+
