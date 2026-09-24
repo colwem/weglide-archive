@@ -62,7 +62,7 @@ jobs:
             --max-runtime-minutes "${{ inputs.runtime_minutes }}" \
             --max-flights "${{ inputs.max_flights }}" \
             --priority-area "${{ inputs.priority_area }}" \
-            --min-delay 5 --max-delay 10
+            --min-delay 0.5 --max-delay 1.5
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           exit 0

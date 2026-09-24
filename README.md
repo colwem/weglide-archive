@@ -97,8 +97,8 @@ on every audit invocation.
 --max-runtime-minutes N  Stop cleanly after N minutes; 0 is unlimited
 --priority-area AREA Northeast priority (default northeast), or na
 --restart-scan       Reset the saved day and rescan from --start-date
---min-delay SECONDS  Minimum pause (default 5)
---max-delay SECONDS  Maximum pause (default 10)
+--min-delay SECONDS  Minimum pause (default 0.5)
+--max-delay SECONDS  Maximum pause (default 1.5)
 --min-list-delay S   Minimum pause between listing requests (default 2)
 --max-list-delay S   Maximum pause between listing requests (default 5)
 --headless           Hide browser (default; currently fails locally)
