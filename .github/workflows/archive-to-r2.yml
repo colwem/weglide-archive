@@ -51,7 +51,7 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - name: Restore durable checkpoint from R2
         id: restore
-        run: python r2_storage.py pull --output archive --prefix "$ARCHIVE_PREFIX"
+        run: python r2_storage.py pull --output archive --prefix "$ARCHIVE_PREFIX" --recover-orphan-payloads
       - name: Collect through a virtual display
         id: collector
         shell: bash

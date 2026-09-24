@@ -64,6 +64,38 @@ def pull(client, bucket: str, prefix: str, root: Path) -> None:
             db.close()
 
 
+def recover_orphan_payloads(client, bucket: str, prefix: str, root: Path) -> None:
+    database = root / "index.sqlite3"
+    if not database.is_file():
+        raise RuntimeError("Restore the SQLite index before recovering orphan payloads")
+    db = sqlite3.connect(database)
+    try:
+        completed = {int(row[0]) for row in db.execute(
+            "SELECT id FROM flights WHERE status='complete'")}
+    finally:
+        db.close()
+
+    recovered = 0
+    for directory in ("raw_tracks", "details"):
+        remote_prefix = key(prefix, f"data/{directory}/")
+        local_directory = root / f"recovery_{directory}"
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=remote_prefix):
+            for item in page.get("Contents", []):
+                filename = item["Key"].rsplit("/", 1)[-1]
+                try:
+                    flight_id = int(Path(filename).stem.rsplit("_", 1)[-1])
+                except ValueError:
+                    continue
+                if flight_id in completed:
+                    continue
+                destination = local_directory / filename
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                client.download_file(bucket, item["Key"], str(destination))
+                recovered += 1
+    print(f"Recovered {recovered} orphan payload files for request reuse")
+
+
 def upload_file(client, bucket: str, source: Path, object_key: str) -> None:
     content_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
     client.upload_file(str(source), bucket, object_key, ExtraArgs={"ContentType": content_type})
@@ -191,11 +223,15 @@ def main() -> int:
     parser.add_argument("--prefix", default="north-america-v1")
     parser.add_argument("--prune-uploaded", action="store_true",
                         help="Remove staged payload files only after the manifest is published")
+    parser.add_argument("--recover-orphan-payloads", action="store_true",
+                        help="With pull, cache unindexed raw/detail objects for request reuse")
     args = parser.parse_args()
     client, bucket = client_and_bucket()
     root = Path(args.output)
     if args.command == "pull":
         pull(client, bucket, args.prefix, root)
+        if args.recover_orphan_payloads:
+            recover_orphan_payloads(client, bucket, args.prefix, root)
     elif args.command == "push":
         push(client, bucket, args.prefix, root, args.prune_uploaded)
     elif args.command == "check":

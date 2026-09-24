@@ -377,6 +377,17 @@ def write_error(db: sqlite3.Connection, flight_id: int, listing: dict[str, Any],
     db.commit()
 
 
+def cached_payload(root: Path, directory: str, listing: dict[str, Any]) -> tuple[dict[str, Any] | None, Path]:
+    path = root / f"recovery_{directory}" / f"{listing['scoring_date']}_{int(listing['id'])}.json"
+    if not path.is_file():
+        return None, path
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if int(payload.get("id", -1)) != int(listing["id"]):
+        raise ValueError(f"Recovered {directory} payload ID does not match {listing['id']}")
+    return payload, path
+
+
 def export_metadata(db: sqlite3.Connection, path: Path) -> None:
     columns = ["id", "scoring_date", "start_utc", "end_utc", "pilot", "copilot",
                "aircraft", "registration", "competition_id", "airport", "point_count",
@@ -568,12 +579,34 @@ async def collect(args: argparse.Namespace) -> int:
                             print(f"Downloading flight {flight_id}", flush=True)
                             attempted += 1
                             try:
-                                detail_result, track_result = await browser_fetch(
-                                    page, [DETAIL_URL.format(flight_id=flight_id), TRACK_URL.format(flight_id=flight_id)])
-                                if detail_result.status != 200 or track_result.status != 200:
-                                    raise RuntimeError(f"detail HTTP {detail_result.status}; track HTTP {track_result.status}")
-                                detail, track = json.loads(detail_result.body), json.loads(track_result.body)
+                                detail, cached_detail_path = cached_payload(root, "details", listing)
+                                track, cached_track_path = cached_payload(root, "raw_tracks", listing)
+                                requests: list[tuple[str, str]] = []
+                                if detail is None:
+                                    requests.append(("detail", DETAIL_URL.format(flight_id=flight_id)))
+                                if track is None:
+                                    requests.append(("track", TRACK_URL.format(flight_id=flight_id)))
+                                if requests:
+                                    results = await browser_fetch(page, [url for _, url in requests])
+                                    for (kind, _), result in zip(requests, results):
+                                        if result.status != 200:
+                                            raise RuntimeError(f"{kind} HTTP {result.status}")
+                                        if kind == "detail":
+                                            detail = json.loads(result.body)
+                                        else:
+                                            track = json.loads(result.body)
+                                if detail is None or track is None:
+                                    raise RuntimeError("Flight payload assembly was incomplete")
+                                if cached_track_path.is_file() or cached_detail_path.is_file():
+                                    reused = [name for name, path in (("track", cached_track_path),
+                                                                      ("detail", cached_detail_path)) if path.is_file()]
+                                    print(f"Reused recovered {' and '.join(reused)} for flight {flight_id}", flush=True)
                                 write_flight(db, root, listing, detail, track)
+                                if args.r2_sync_every_flights:
+                                    if cached_track_path.is_file():
+                                        (root / "raw_tracks" / f"{listing['scoring_date']}_{flight_id}.json").unlink()
+                                    if cached_detail_path.is_file():
+                                        (root / "details" / f"{listing['scoring_date']}_{flight_id}.json").unlink()
                                 downloaded += 1
                                 consecutive_errors = 0
                                 export_metadata(db, root / "flights.csv")

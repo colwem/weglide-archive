@@ -130,7 +130,9 @@ so a production workflow must use bounded runs and durable external object
 storage for data and checkpoint state.
 
 The `Archive North America to R2` workflow restores only the SQLite checkpoint
-and metadata export. Previously downloaded payloads stay in R2. During collection
+and metadata export, plus any unindexed payloads left by an interrupted upload.
+Those recovery payloads are reused instead of requesting the same data again.
+Previously indexed payloads stay in R2. During collection
 it publishes every 20 new flights: JSON and CSV payloads first, then the metadata,
 SQLite index, and manifest. Locally staged payloads are removed only after that
 manifest succeeds. An interruption therefore loses at most the current small
