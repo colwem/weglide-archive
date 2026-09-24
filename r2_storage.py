@@ -118,9 +118,69 @@ def check(client, bucket: str, prefix: str) -> None:
     print(json.dumps({"bucket": bucket, "state_objects": objects}, indent=2))
 
 
+def inventory(client, bucket: str, prefix: str) -> None:
+    groups = {
+        "raw_tracks": [0, 0],
+        "details": [0, 0],
+        "tracks": [0, 0],
+        "state": [0, 0],
+        "other": [0, 0],
+    }
+    paginator = client.get_paginator("list_objects_v2")
+    base = prefix.strip("/") + "/"
+    for page in paginator.paginate(Bucket=bucket, Prefix=base):
+        for item in page.get("Contents", []):
+            relative = item["Key"][len(base):]
+            if relative.startswith("data/raw_tracks/"):
+                group = "raw_tracks"
+            elif relative.startswith("data/details/"):
+                group = "details"
+            elif relative.startswith("data/tracks/"):
+                group = "tracks"
+            elif relative.startswith("state/"):
+                group = "state"
+            else:
+                group = "other"
+            groups[group][0] += 1
+            groups[group][1] += item["Size"]
+
+    manifest = None
+    try:
+        response = client.get_object(Bucket=bucket, Key=key(prefix, "state/manifest.json"))
+        manifest = json.loads(response["Body"].read())
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey", "NotFound"):
+            raise
+
+    result = {
+        "prefix": prefix,
+        "total_objects": sum(value[0] for value in groups.values()),
+        "total_bytes": sum(value[1] for value in groups.values()),
+        "groups": {name: {"objects": value[0], "bytes": value[1]} for name, value in groups.items()},
+        "published_manifest": manifest,
+    }
+    print(json.dumps(result, indent=2))
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        lines = [
+            "# R2 archive inventory", "",
+            f"**Prefix:** `{prefix}`  ",
+            f"**Total:** {result['total_objects']:,} objects, {result['total_bytes'] / 1048576:.1f} MiB", "",
+            "| Group | Objects | Size (MiB) |", "|---|---:|---:|",
+        ]
+        lines.extend(
+            f"| {name} | {value[0]:,} | {value[1] / 1048576:.1f} |"
+            for name, value in groups.items()
+        )
+        lines.extend(["", "## Published manifest", "", "```json",
+                      json.dumps(manifest, indent=2), "```", ""])
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("pull", "push", "check"))
+    parser.add_argument("command", choices=("pull", "push", "check", "inventory"))
     parser.add_argument("--output", default="weglide_archive_data")
     parser.add_argument("--prefix", default="north-america-v1")
     args = parser.parse_args()
@@ -130,8 +190,10 @@ def main() -> int:
         pull(client, bucket, args.prefix, root)
     elif args.command == "push":
         push(client, bucket, args.prefix, root)
-    else:
+    elif args.command == "check":
         check(client, bucket, args.prefix)
+    else:
+        inventory(client, bucket, args.prefix)
     return 0
 
 
