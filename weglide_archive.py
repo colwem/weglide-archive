@@ -499,6 +499,7 @@ async def collect(args: argparse.Namespace) -> int:
                         return 0
                     current = date.fromisoformat(state['current_date'])
                     oldest = date.fromisoformat(args.stop_date)
+                    listing_requests = 0
                     while current >= oldest:
                         if time_expired():
                             print(f"Reached --max-runtime-minutes {args.max_runtime_minutes}; checkpoint retained.", flush=True)
@@ -512,7 +513,10 @@ async def collect(args: argparse.Namespace) -> int:
                             if time_expired():
                                 print(f"Reached --max-runtime-minutes {args.max_runtime_minutes}; checkpoint remains on {day}.", flush=True)
                                 return 0
+                            if listing_requests:
+                                await asyncio.sleep(random.uniform(args.min_list_delay, args.max_list_delay))
                             batch = as_list(await fetch_json(page, day_url(list_template, day, offset, 100)))
+                            listing_requests += 1
                             validate_batch(batch, day, seen)
                             if not batch:
                                 break
@@ -530,7 +534,6 @@ async def collect(args: argparse.Namespace) -> int:
                             if len(batch) < 100:
                                 break
                             offset += len(batch)
-                            await asyncio.sleep(random.uniform(2, 5))
                         listings.sort(key=lambda item: (not in_area(item, priority_regions), -int(item['id'])))
                         pending = [item for item in listings if not completed_flight(db, int(item['id']))]
                         print(f"  {len(pending)} pending; Northeast-priority={args.priority_area != 'na'}", flush=True)
@@ -638,6 +641,10 @@ def parser() -> argparse.ArgumentParser:
                                 help="Reset this date-range checkpoint and rescan from --start-date")
     collect_parser.add_argument("--min-delay", type=float, default=5)
     collect_parser.add_argument("--max-delay", type=float, default=10)
+    collect_parser.add_argument("--min-list-delay", type=float, default=2,
+                                help="Minimum pause between listing requests (default 2)")
+    collect_parser.add_argument("--max-list-delay", type=float, default=5,
+                                help="Maximum pause between listing requests (default 5)")
     visibility = collect_parser.add_mutually_exclusive_group()
     visibility.add_argument("--headless", dest="headless", action="store_true")
     visibility.add_argument("--visible", dest="headless", action="store_false")
@@ -654,6 +661,8 @@ def main() -> int:
         return inspect(args)
     if args.min_delay < 0 or args.max_delay < args.min_delay:
         raise ValueError("Require 0 <= --min-delay <= --max-delay")
+    if args.min_list_delay < 0 or args.max_list_delay < args.min_list_delay:
+        raise ValueError("Require 0 <= --min-list-delay <= --max-list-delay")
     if args.max_flights < 0:
         raise ValueError("--max-flights must be nonnegative")
     if args.max_runtime_minutes < 0:

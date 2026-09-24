@@ -99,12 +99,15 @@ on every audit invocation.
 --restart-scan       Reset the saved day and rescan from --start-date
 --min-delay SECONDS  Minimum pause (default 5)
 --max-delay SECONDS  Maximum pause (default 10)
+--min-list-delay S   Minimum pause between listing requests (default 2)
+--max-list-delay S   Maximum pause between listing requests (default 5)
 --headless           Hide browser (default; currently fails locally)
 --visible            Normal visible browser (validated)
 ```
 
 Defaults average 7.5 seconds of waiting per attempted flight, plus network and
-disk time, with 2–5 seconds between listing pages. Stop with Ctrl+C and rerun to
+disk time, with 2–5 seconds between every listing request, including when moving
+across empty or sparse dates. Stop with Ctrl+C and rerun to
 resume. The newest listings are rescanned, and completed flights are skipped.
 HTTP 401/403/429 and browser-level fetch failures stop collection; three
 consecutive other flight errors also stop it. A failed flight never becomes

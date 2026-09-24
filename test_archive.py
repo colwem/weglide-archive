@@ -54,6 +54,7 @@ class ArchiveTests(unittest.TestCase):
         args = archive.parser().parse_args(['collect'])
         self.assertTrue(args.headless)
         self.assertEqual((args.min_delay, args.max_delay), (5, 10))
+        self.assertEqual((args.min_list_delay, args.max_list_delay), (2, 5))
         self.assertEqual(args.priority_area, 'northeast')
         self.assertEqual(args.max_runtime_minutes, 0)
         self.assertFalse(archive.parser().parse_args(['collect', '--visible']).headless)
