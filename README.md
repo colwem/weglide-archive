@@ -95,6 +95,8 @@ on every audit invocation.
 --stop-date DATE     Oldest scoring date (default 2015-01-01)
 --max-flights N      New-flight limit; 0 is unlimited
 --max-runtime-minutes N  Stop cleanly after N minutes; 0 is unlimited
+--r2-sync-every-flights N  Publish every N new flights; 0 disables it
+--r2-prefix PREFIX    R2 object prefix (default north-america-v1)
 --priority-area AREA Northeast priority (default northeast), or na
 --restart-scan       Reset the saved day and rescan from --start-date
 --min-delay SECONDS  Minimum pause (default 0.5)
@@ -105,7 +107,7 @@ on every audit invocation.
 --visible            Normal visible browser (validated)
 ```
 
-Defaults average 7.5 seconds of waiting per attempted flight, plus network and
+Defaults average 1 second of waiting per attempted flight, plus network and
 disk time, with 2–5 seconds between every listing request, including when moving
 across empty or sparse dates. Stop with Ctrl+C and rerun to
 resume. The newest listings are rescanned, and completed flights are skipped.
@@ -128,10 +130,12 @@ so a production workflow must use bounded runs and durable external object
 storage for data and checkpoint state.
 
 The `Archive North America to R2` workflow restores only the SQLite checkpoint
-and metadata export. Previously downloaded payloads stay in R2. New JSON and CSV
-files are uploaded first and the updated SQLite index is published last, so a
-failed upload cannot advertise incomplete data as complete. The default runtime
-is 330 minutes, leaving 30 minutes for upload before GitHub's six-hour cutoff.
+and metadata export. Previously downloaded payloads stay in R2. During collection
+it publishes every 20 new flights: JSON and CSV payloads first, then the metadata,
+SQLite index, and manifest. Locally staged payloads are removed only after that
+manifest succeeds. An interruption therefore loses at most the current small
+batch, while the last published index always points to complete remote data. A
+final upload step publishes any remainder. The default runtime is 330 minutes.
 
 The existing archive contains old directories whose names end in .json or .csv
 and which hold .part files. They are preserved and are not indexed as complete.

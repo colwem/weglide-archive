@@ -15,6 +15,7 @@ import math
 from pathlib import Path
 import random
 import sqlite3
+import subprocess
 import sys
 import time
 from typing import Any, Iterable
@@ -388,6 +389,20 @@ def export_metadata(db: sqlite3.Connection, path: Path) -> None:
     temp.replace(path)
 
 
+def sync_to_r2(root: Path, prefix: str) -> None:
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("r2_storage.py")),
+        "push",
+        "--output", str(root),
+        "--prefix", prefix,
+        "--prune-uploaded",
+    ]
+    print("Publishing an incremental R2 checkpoint...", flush=True)
+    subprocess.run(command, check=True)
+    print("Incremental R2 checkpoint published.", flush=True)
+
+
 async def browser_fetch(page: Any, urls: list[str]) -> list[FetchResult]:
     results = await page.evaluate("""
         async (urls) => Promise.all(urls.map(async (url) => {
@@ -471,6 +486,7 @@ async def collect(args: argparse.Namespace) -> int:
     )
     db = open_database(root / "index.sqlite3")
     downloaded = attempted = consecutive_errors = 0
+    last_synced_downloaded = 0
     state = checkpoint(db, args)
     priority_regions = area_regions(args.priority_area)
     deadline = (time.monotonic() + args.max_runtime_minutes * 60
@@ -571,6 +587,11 @@ async def collect(args: argparse.Namespace) -> int:
                                 consecutive_errors += 1
                                 if consecutive_errors >= 3:
                                     raise RuntimeError("Stopped after three consecutive flight errors") from exc
+                            else:
+                                if (args.r2_sync_every_flights and
+                                        downloaded - last_synced_downloaded >= args.r2_sync_every_flights):
+                                    sync_to_r2(root, args.r2_prefix)
+                                    last_synced_downloaded = downloaded
                         current -= timedelta(days=1)
                         state['current_date'] = current.isoformat()
                         state['finished'] = int(current < oldest)
@@ -635,6 +656,9 @@ def parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--max-flights", type=int, default=0)
     collect_parser.add_argument("--max-runtime-minutes", type=float, default=0,
                                 help="Stop cleanly after this many minutes; 0 is unlimited")
+    collect_parser.add_argument("--r2-sync-every-flights", type=int, default=0,
+                                help="Publish an R2 checkpoint after this many new flights; 0 disables it")
+    collect_parser.add_argument("--r2-prefix", default="north-america-v1")
     collect_parser.add_argument("--priority-area", choices=("na", "ne-us", "northeast"), default="northeast",
                                 help="Download this takeoff region first within each day")
     collect_parser.add_argument("--restart-scan", action="store_true",
@@ -667,6 +691,8 @@ def main() -> int:
         raise ValueError("--max-flights must be nonnegative")
     if args.max_runtime_minutes < 0:
         raise ValueError("--max-runtime-minutes must be nonnegative")
+    if args.r2_sync_every_flights < 0:
+        raise ValueError("--r2-sync-every-flights must be nonnegative")
     return asyncio.run(collect(args))
 
 

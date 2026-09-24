@@ -62,13 +62,14 @@ jobs:
             --max-runtime-minutes "${{ inputs.runtime_minutes }}" \
             --max-flights "${{ inputs.max_flights }}" \
             --priority-area "${{ inputs.priority_area }}" \
+            --r2-sync-every-flights 20 --r2-prefix "$ARCHIVE_PREFIX" \
             --min-delay 0.5 --max-delay 1.5
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           exit 0
       - name: Upload new files and publish checkpoint last
         if: always() && steps.restore.outcome == 'success'
-        run: python r2_storage.py push --output archive --prefix "$ARCHIVE_PREFIX"
+        run: python r2_storage.py push --output archive --prefix "$ARCHIVE_PREFIX" --prune-uploaded
       - name: Confirm stored R2 state
         if: always() && steps.restore.outcome == 'success'
         run: python r2_storage.py check --prefix "$ARCHIVE_PREFIX"

@@ -57,6 +57,7 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual((args.min_list_delay, args.max_list_delay), (2, 5))
         self.assertEqual(args.priority_area, 'northeast')
         self.assertEqual(args.max_runtime_minutes, 0)
+        self.assertEqual(args.r2_sync_every_flights, 0)
         self.assertFalse(archive.parser().parse_args(['collect', '--visible']).headless)
 
     def test_day_url_has_verified_filters(self):

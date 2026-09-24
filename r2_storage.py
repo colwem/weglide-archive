@@ -70,7 +70,7 @@ def upload_file(client, bucket: str, source: Path, object_key: str) -> None:
     print(f"Uploaded {object_key} ({source.stat().st_size} bytes)")
 
 
-def push(client, bucket: str, prefix: str, root: Path) -> None:
+def push(client, bucket: str, prefix: str, root: Path, prune_uploaded: bool = False) -> None:
     database = root / "index.sqlite3"
     if not database.is_file():
         raise RuntimeError("Collector index does not exist; refusing to upload empty state")
@@ -84,6 +84,7 @@ def push(client, bucket: str, prefix: str, root: Path) -> None:
         db.close()
 
     uploaded = 0
+    uploaded_sources: list[Path] = []
     for directory in ("raw_tracks", "details", "tracks"):
         base = root / directory
         if not base.exists():
@@ -91,6 +92,7 @@ def push(client, bucket: str, prefix: str, root: Path) -> None:
         for source in sorted(path for path in base.iterdir() if path.is_file() and not path.name.endswith(".part")):
             upload_file(client, bucket, source, key(prefix, f"data/{directory}/{source.name}"))
             uploaded += 1
+            uploaded_sources.append(source)
 
     flights_csv = root / "flights.csv"
     if flights_csv.is_file():
@@ -110,6 +112,10 @@ def push(client, bucket: str, prefix: str, root: Path) -> None:
         ContentType="application/json",
     )
     print(f"Published checkpoint for {completed} complete flights")
+    if prune_uploaded:
+        for source in uploaded_sources:
+            source.unlink(missing_ok=True)
+        print(f"Removed {len(uploaded_sources)} locally staged payload files")
 
 
 def check(client, bucket: str, prefix: str) -> None:
@@ -183,13 +189,15 @@ def main() -> int:
     parser.add_argument("command", choices=("pull", "push", "check", "inventory"))
     parser.add_argument("--output", default="weglide_archive_data")
     parser.add_argument("--prefix", default="north-america-v1")
+    parser.add_argument("--prune-uploaded", action="store_true",
+                        help="Remove staged payload files only after the manifest is published")
     args = parser.parse_args()
     client, bucket = client_and_bucket()
     root = Path(args.output)
     if args.command == "pull":
         pull(client, bucket, args.prefix, root)
     elif args.command == "push":
-        push(client, bucket, args.prefix, root)
+        push(client, bucket, args.prefix, root, args.prune_uploaded)
     elif args.command == "check":
         check(client, bucket, args.prefix)
     else:
