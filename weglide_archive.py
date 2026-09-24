@@ -14,7 +14,6 @@ import json
 import math
 from pathlib import Path
 import random
-import signal
 import sqlite3
 import sys
 import time
@@ -474,6 +473,11 @@ async def collect(args: argparse.Namespace) -> int:
     downloaded = attempted = consecutive_errors = 0
     state = checkpoint(db, args)
     priority_regions = area_regions(args.priority_area)
+    deadline = (time.monotonic() + args.max_runtime_minutes * 60
+                if args.max_runtime_minutes else None)
+
+    def time_expired() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
 
     try:
         with archive_lock(root):
@@ -496,12 +500,18 @@ async def collect(args: argparse.Namespace) -> int:
                     current = date.fromisoformat(state['current_date'])
                     oldest = date.fromisoformat(args.stop_date)
                     while current >= oldest:
+                        if time_expired():
+                            print(f"Reached --max-runtime-minutes {args.max_runtime_minutes}; checkpoint retained.", flush=True)
+                            return 0
                         day = current.isoformat()
                         print(f"Scanning North America for {day}...", flush=True)
                         listings: list[dict[str, Any]] = []
                         seen: set[int] = set()
                         offset = 0
                         while True:
+                            if time_expired():
+                                print(f"Reached --max-runtime-minutes {args.max_runtime_minutes}; checkpoint remains on {day}.", flush=True)
+                                return 0
                             batch = as_list(await fetch_json(page, day_url(list_template, day, offset, 100)))
                             validate_batch(batch, day, seen)
                             if not batch:
@@ -525,6 +535,9 @@ async def collect(args: argparse.Namespace) -> int:
                         pending = [item for item in listings if not completed_flight(db, int(item['id']))]
                         print(f"  {len(pending)} pending; Northeast-priority={args.priority_area != 'na'}", flush=True)
                         for listing in pending:
+                            if time_expired():
+                                print(f"Reached --max-runtime-minutes {args.max_runtime_minutes}; checkpoint remains on {day}.", flush=True)
+                                return 0
                             if args.max_flights and downloaded >= args.max_flights:
                                 print(f"Reached --max-flights {args.max_flights}; checkpoint remains on {day}.", flush=True)
                                 return 0
@@ -617,6 +630,8 @@ def parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--start-date")
     collect_parser.add_argument("--stop-date", default="2015-01-01")
     collect_parser.add_argument("--max-flights", type=int, default=0)
+    collect_parser.add_argument("--max-runtime-minutes", type=float, default=0,
+                                help="Stop cleanly after this many minutes; 0 is unlimited")
     collect_parser.add_argument("--priority-area", choices=("na", "ne-us", "northeast"), default="northeast",
                                 help="Download this takeoff region first within each day")
     collect_parser.add_argument("--restart-scan", action="store_true",
@@ -641,6 +656,8 @@ def main() -> int:
         raise ValueError("Require 0 <= --min-delay <= --max-delay")
     if args.max_flights < 0:
         raise ValueError("--max-flights must be nonnegative")
+    if args.max_runtime_minutes < 0:
+        raise ValueError("--max-runtime-minutes must be nonnegative")
     return asyncio.run(collect(args))
 
 

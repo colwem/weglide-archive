@@ -94,6 +94,7 @@ on every audit invocation.
 --start-date DATE    Newest scoring date (default today)
 --stop-date DATE     Oldest scoring date (default 2015-01-01)
 --max-flights N      New-flight limit; 0 is unlimited
+--max-runtime-minutes N  Stop cleanly after N minutes; 0 is unlimited
 --priority-area AREA Northeast priority (default northeast), or na
 --restart-scan       Reset the saved day and rescan from --start-date
 --min-delay SECONDS  Minimum pause (default 5)
@@ -122,6 +123,12 @@ retains the small test artifact for three days. It does not run on a schedule an
 does not hold the long-term archive. GitHub-hosted jobs have a six-hour ceiling,
 so a production workflow must use bounded runs and durable external object
 storage for data and checkpoint state.
+
+The `Archive North America to R2` workflow restores only the SQLite checkpoint
+and metadata export. Previously downloaded payloads stay in R2. New JSON and CSV
+files are uploaded first and the updated SQLite index is published last, so a
+failed upload cannot advertise incomplete data as complete. The default runtime
+is 330 minutes, leaving 30 minutes for upload before GitHub's six-hour cutoff.
 
 The existing archive contains old directories whose names end in .json or .csv
 and which hold .part files. They are preserved and are not indexed as complete.

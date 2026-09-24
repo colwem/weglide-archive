@@ -1,0 +1,77 @@
+name: Archive North America to R2
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_minutes:
+        description: Collector runtime; 330 leaves upload time before the six-hour job limit
+        required: true
+        default: "330"
+        type: number
+      max_flights:
+        description: New-flight limit; 0 means runtime-limited only
+        required: true
+        default: "0"
+        type: number
+      priority_area:
+        description: Takeoff region to download first within each day
+        required: true
+        default: northeast
+        type: choice
+        options:
+          - northeast
+          - ne-us
+          - na
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weglide-r2-archive
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      ARCHIVE_PREFIX: north-america-v1
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-storage.txt
+      - run: pip install -r requirements-storage.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Restore durable checkpoint from R2
+        id: restore
+        run: python r2_storage.py pull --output archive --prefix "$ARCHIVE_PREFIX"
+      - name: Collect through a virtual display
+        id: collector
+        shell: bash
+        run: |
+          set +e
+          xvfb-run -a python weglide_archive.py collect \
+            --visible --output archive --profile browser-profile \
+            --max-runtime-minutes "${{ inputs.runtime_minutes }}" \
+            --max-flights "${{ inputs.max_flights }}" \
+            --priority-area "${{ inputs.priority_area }}" \
+            --min-delay 5 --max-delay 10
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Upload new files and publish checkpoint last
+        if: always() && steps.restore.outcome == 'success'
+        run: python r2_storage.py push --output archive --prefix "$ARCHIVE_PREFIX"
+      - name: Confirm stored R2 state
+        if: always() && steps.restore.outcome == 'success'
+        run: python r2_storage.py check --prefix "$ARCHIVE_PREFIX"
+      - name: Propagate collector failure after preserving state
+        if: steps.collector.outputs.exit_code != '0'
+        run: exit "${{ steps.collector.outputs.exit_code }}"
