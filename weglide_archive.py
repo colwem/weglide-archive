@@ -696,8 +696,8 @@ def parser() -> argparse.ArgumentParser:
                                 help="Download this takeoff region first within each day")
     collect_parser.add_argument("--restart-scan", action="store_true",
                                 help="Reset this date-range checkpoint and rescan from --start-date")
-    collect_parser.add_argument("--min-delay", type=float, default=0.5)
-    collect_parser.add_argument("--max-delay", type=float, default=1.5)
+    collect_parser.add_argument("--min-delay", type=float, default=4)
+    collect_parser.add_argument("--max-delay", type=float, default=8)
     collect_parser.add_argument("--min-list-delay", type=float, default=2,
                                 help="Minimum pause between listing requests (default 2)")
     collect_parser.add_argument("--max-list-delay", type=float, default=5,

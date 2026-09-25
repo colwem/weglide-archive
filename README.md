@@ -99,15 +99,15 @@ on every audit invocation.
 --r2-prefix PREFIX    R2 object prefix (default north-america-v1)
 --priority-area AREA Northeast priority (default northeast), or na
 --restart-scan       Reset the saved day and rescan from --start-date
---min-delay SECONDS  Minimum pause (default 0.5)
---max-delay SECONDS  Maximum pause (default 1.5)
+--min-delay SECONDS  Minimum pause (default 4)
+--max-delay SECONDS  Maximum pause (default 8)
 --min-list-delay S   Minimum pause between listing requests (default 2)
 --max-list-delay S   Maximum pause between listing requests (default 5)
 --headless           Hide browser (default; currently fails locally)
 --visible            Normal visible browser (validated)
 ```
 
-Defaults average 1 second of waiting per attempted flight, plus network and
+Defaults average 6 seconds of waiting per attempted flight, plus network and
 disk time, with 2–5 seconds between every listing request, including when moving
 across empty or sparse dates. Stop with Ctrl+C and rerun to
 resume. The newest listings are rescanned, and completed flights are skipped.

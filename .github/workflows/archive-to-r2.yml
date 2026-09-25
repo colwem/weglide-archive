@@ -22,6 +22,16 @@ on:
           - northeast
           - ne-us
           - na
+      min_delay:
+        description: Minimum randomized pause between flights in seconds
+        required: true
+        default: "4"
+        type: number
+      max_delay:
+        description: Maximum randomized pause between flights in seconds
+        required: true
+        default: "8"
+        type: number
 
 permissions:
   contents: read
@@ -63,7 +73,7 @@ jobs:
             --max-flights "${{ inputs.max_flights }}" \
             --priority-area "${{ inputs.priority_area }}" \
             --r2-sync-every-flights 20 --r2-prefix "$ARCHIVE_PREFIX" \
-            --min-delay 0.5 --max-delay 1.5
+            --min-delay "${{ inputs.min_delay }}" --max-delay "${{ inputs.max_delay }}"
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           exit 0
