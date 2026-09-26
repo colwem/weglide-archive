@@ -111,9 +111,12 @@ Defaults average 6 seconds of waiting per attempted flight, plus network and
 disk time, with 2–5 seconds between every listing request, including when moving
 across empty or sparse dates. Stop with Ctrl+C and rerun to
 resume. The newest listings are rescanned, and completed flights are skipped.
-HTTP 401/403/429 and browser-level fetch failures stop collection; three
-consecutive other flight errors also stop it. A failed flight never becomes
-complete in the index. Completed files are atomically renamed from .part.
+HTTP 401/403/429 responses stop collection immediately. An ambiguous browser
+network failure waits a randomized 2.5–3.5 minutes and retries the failed
+request once; a second failure stops collection so the workflow can preserve
+state and cool down. Three consecutive other flight errors also stop it. A
+failed flight never becomes complete in the index. Completed files are
+atomically renamed from .part.
 
 Before a large run, confirm viewer-data sampling is suitable, resolve or accept
 the visible-browser requirement, and assess disk space and actual pace.
