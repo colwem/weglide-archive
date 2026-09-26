@@ -414,7 +414,7 @@ def sync_to_r2(root: Path, prefix: str) -> None:
     print("Incremental R2 checkpoint published.", flush=True)
 
 
-async def browser_fetch(page: Any, urls: list[str]) -> list[FetchResult]:
+async def browser_fetch_once(page: Any, urls: list[str]) -> list[FetchResult]:
     results = await page.evaluate("""
         async (urls) => Promise.all(urls.map(async (url) => {
             let response;
@@ -430,15 +430,54 @@ async def browser_fetch(page: Any, urls: list[str]) -> list[FetchResult]:
             };
         }))
     """, urls)
-    output = [FetchResult(int(item["status"]), item["body"], item.get("retry_after"))
-              for item in results]
-    for result in output:
-        if result.status == 0:
-            raise StopAccess(f"Browser request failed ({result.body}); the browser may hide an HTTP refusal behind a CORS error. Inspect the diagnostics; --visible is available for troubleshooting.")
-        if result.status in (401, 403, 429):
-            extra = f" Retry-After: {result.retry_after}." if result.retry_after else ""
-            raise StopAccess(f"Site returned HTTP {result.status}.{extra}")
-    return output
+    return [FetchResult(int(item["status"]), item["body"], item.get("retry_after"))
+            for item in results]
+
+
+async def browser_fetch(
+        page: Any,
+        urls: list[str],
+        *,
+        transient_retries: int = 1,
+        transient_retry_min: float = 150,
+        transient_retry_max: float = 210,
+) -> list[FetchResult]:
+    """Fetch through Chromium, retrying only ambiguous network failures once.
+
+    Explicit access and throttling responses stop immediately. Chromium can
+    expose a transient connection failure or a CORS-hidden refusal only as
+    status zero, so those failures get one deliberately slow retry before the
+    collector checkpoints and exits.
+    """
+    output = await browser_fetch_once(page, urls)
+    retries_left = transient_retries
+    while True:
+        for result in output:
+            if result.status in (401, 403, 429):
+                extra = f" Retry-After: {result.retry_after}." if result.retry_after else ""
+                raise StopAccess(f"Site returned HTTP {result.status}.{extra}")
+
+        failed_indices = [index for index, result in enumerate(output) if result.status == 0]
+        if not failed_indices:
+            return output
+        if retries_left <= 0:
+            failure = output[failed_indices[0]]
+            raise StopAccess(
+                f"Browser request failed twice ({failure.body}); the browser may hide an HTTP refusal "
+                "behind a CORS error. Inspect the diagnostics; --visible is available for troubleshooting."
+            )
+
+        delay = random.uniform(transient_retry_min, transient_retry_max)
+        print(
+            f"Browser network failure for {len(failed_indices)} request(s); "
+            f"waiting {delay:.1f}s before one retry...",
+            flush=True,
+        )
+        await asyncio.sleep(delay)
+        retry_results = await browser_fetch_once(page, [urls[index] for index in failed_indices])
+        for index, result in zip(failed_indices, retry_results):
+            output[index] = result
+        retries_left -= 1
 
 
 async def discover_list_url(page: Any) -> str:
