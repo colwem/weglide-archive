@@ -95,4 +95,8 @@ jobs:
         run: python r2_storage.py check --prefix "$ARCHIVE_PREFIX"
       - name: Propagate collector failure after preserving state
         if: steps.collector.outputs.exit_code != '0'
-        run: exit "${{ steps.collector.outputs.exit_code }}"
+        shell: bash
+        run: |
+          echo "Collector failed; holding the archive concurrency lock for a 20-minute cooldown."
+          sleep 1200
+          exit "${{ steps.collector.outputs.exit_code }}"
