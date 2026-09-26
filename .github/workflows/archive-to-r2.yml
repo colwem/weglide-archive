@@ -1,6 +1,11 @@
 name: Archive North America to R2
 
 on:
+  schedule:
+    # Keep one replacement run pending behind the active 5.5-hour collector.
+    # GitHub concurrency replaces older pending runs, so the newest one starts
+    # as soon as the active run finishes without overlapping collectors.
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       runtime_minutes:
@@ -50,6 +55,11 @@ jobs:
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
       ARCHIVE_PREFIX: north-america-v1
+      COLLECT_RUNTIME_MINUTES: ${{ inputs.runtime_minutes || '330' }}
+      COLLECT_MAX_FLIGHTS: ${{ inputs.max_flights || '0' }}
+      COLLECT_PRIORITY_AREA: ${{ inputs.priority_area || 'northeast' }}
+      COLLECT_MIN_DELAY: ${{ inputs.min_delay || '4' }}
+      COLLECT_MAX_DELAY: ${{ inputs.max_delay || '8' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -69,11 +79,11 @@ jobs:
           set +e
           xvfb-run -a python weglide_archive.py collect \
             --visible --output archive --profile browser-profile \
-            --max-runtime-minutes "${{ inputs.runtime_minutes }}" \
-            --max-flights "${{ inputs.max_flights }}" \
-            --priority-area "${{ inputs.priority_area }}" \
+            --max-runtime-minutes "$COLLECT_RUNTIME_MINUTES" \
+            --max-flights "$COLLECT_MAX_FLIGHTS" \
+            --priority-area "$COLLECT_PRIORITY_AREA" \
             --r2-sync-every-flights 20 --r2-prefix "$ARCHIVE_PREFIX" \
-            --min-delay "${{ inputs.min_delay }}" --max-delay "${{ inputs.max_delay }}"
+            --min-delay "$COLLECT_MIN_DELAY" --max-delay "$COLLECT_MAX_DELAY"
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           exit 0
