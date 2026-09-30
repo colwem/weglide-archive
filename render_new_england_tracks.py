@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 from pathlib import Path
 import struct
@@ -11,12 +12,28 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+from matplotlib.colors import LogNorm
 import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
+from new_england_heatmap import build_geography
+
 
 ATTRIBUTION = "Flight data: WeGlide public viewer (weglide.org)"
+
+
+def display_date(value: str) -> str:
+    parsed = datetime.strptime(value, "%Y-%m-%d")
+    return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year}"
+
+
+def prominent_period(ax, metadata: dict) -> None:
+    ax.text(0.5, 1.012,
+            f"{metadata['qualifying_flights']:,} flights  •  "
+            f"{display_date(metadata['date_start'])} – {display_date(metadata['date_end'])}",
+            transform=ax.transAxes, ha="center", va="bottom", fontsize=13, weight="bold",
+            color="#26343a")
 
 
 def read_condor_extent(trn_path: Path, width: int, height: int):
@@ -50,11 +67,11 @@ def footer(fig, metadata: dict, extra: str = "", color: str = "#33434a") -> None
     fig.text(0.5, 0.012, text, ha="center", va="bottom", fontsize=8, color=color)
 
 
-def render_condor_overlay(segments, metadata: dict, bitmap_path: Path, trn_path: Path,
-                          output: Path) -> None:
+def render_flight_line_overlay(segments, metadata: dict, bitmap_path: Path, trn_path: Path,
+                               output: Path) -> None:
     with Image.open(bitmap_path) as source:
         bitmap = np.asarray(source.convert("RGB"))
-    x0, x1, y0, y1, zone, resolution = read_condor_extent(
+    x0, x1, y0, y1, zone, _ = read_condor_extent(
         trn_path, bitmap.shape[1], bitmap.shape[0])
     transformer = Transformer.from_crs(4326, 32600 + zone, always_xy=True)
     projected = [np.column_stack(transformer.transform(line[:, 0], line[:, 1]))
@@ -72,9 +89,51 @@ def render_condor_overlay(segments, metadata: dict, bitmap_path: Path, trn_path:
     ax.set_ylim(y0, y1)
     ax.set_aspect("equal")
     ax.axis("off")
-    ax.set_title("WeGlide flights over Condor NewEngland3B3", fontsize=16, weight="bold", pad=10)
-    footer(fig, metadata, f"Condor map: {bitmap_path.name} · {resolution:g} m/pixel · UTM {zone}N")
-    fig.tight_layout(rect=(0, 0.028, 1, 0.98))
+    ax.set_title("WeGlide flights over New England", fontsize=19, weight="bold", pad=31)
+    prominent_period(ax, metadata)
+    fig.text(0.5, 0.012, ATTRIBUTION, ha="center", va="bottom", fontsize=8,
+             color="#33434a")
+    fig.tight_layout(rect=(0, 0.025, 1, 0.98))
+    fig.savefig(output, bbox_inches="tight")
+    plt.close(fig)
+
+
+def render_heatmap_overlay(metadata: dict, crossing_grid_path: Path, bitmap_path: Path,
+                           trn_path: Path, output: Path) -> None:
+    with Image.open(bitmap_path) as source:
+        bitmap = np.asarray(source.convert("RGB"))
+    x0, x1, y0, y1, zone, resolution = read_condor_extent(
+        trn_path, bitmap.shape[1], bitmap.shape[0])
+    grid = np.load(crossing_grid_path, allow_pickle=False)["crossings"]
+    geography = build_geography(5.0, 40.0)
+    expected_shape = (geography["height"], geography["width"])
+    if grid.shape != expected_shape:
+        raise ValueError(f"Crossing grid is {grid.shape}, expected {expected_shape}")
+    x_edges = geography["min_x"] + np.arange(geography["width"] + 1) * geography["cell_m"]
+    y_edges = geography["min_y"] + np.arange(geography["height"] + 1) * geography["cell_m"]
+    xx, yy = np.meshgrid(x_edges, y_edges)
+    transformer = Transformer.from_crs(5070, 32600 + zone, always_xy=True)
+    map_x, map_y = transformer.transform(xx, yy)
+    masked = np.ma.masked_less_equal(grid, 0)
+    positive = grid[grid > 0]
+    vmax = max(2.0, float(np.percentile(positive, 99.5)))
+
+    fig, ax = plt.subplots(figsize=(10.5, 12), dpi=180)
+    ax.imshow(bitmap, extent=(x0, x1, y0, y1), origin="upper")
+    heat = ax.pcolormesh(map_x, map_y, masked, cmap="plasma",
+                         norm=LogNorm(vmin=1.0, vmax=vmax), shading="flat",
+                         alpha=0.38, edgecolors="none", rasterized=True)
+    colorbar = fig.colorbar(heat, ax=ax, fraction=0.035, pad=0.018)
+    colorbar.set_label("Flights crossing each 5 km cell (log scale)", fontsize=9)
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title("WeGlide flights over New England", fontsize=19, weight="bold", pad=31)
+    prominent_period(ax, metadata)
+    fig.text(0.5, 0.012, ATTRIBUTION, ha="center", va="bottom", fontsize=8,
+             color="#33434a")
+    fig.tight_layout(rect=(0, 0.025, 1, 0.98))
     fig.savefig(output, bbox_inches="tight")
     plt.close(fig)
 
@@ -122,6 +181,7 @@ def main() -> int:
     parser.add_argument("--condor-bitmap", required=True)
     parser.add_argument("--condor-trn")
     parser.add_argument("--crossing-map", required=True)
+    parser.add_argument("--crossing-grid", required=True)
     parser.add_argument("--output", default="heatmap-results/presentation")
     args = parser.parse_args()
     bundle_path = Path(args.tracks)
@@ -132,8 +192,10 @@ def main() -> int:
     bitmap_path = Path(args.condor_bitmap)
     trn_path = Path(args.condor_trn) if args.condor_trn else bitmap_path.with_name(
         bitmap_path.name.replace("_sect.bmp", ".trn"))
-    render_condor_overlay(segments, metadata, bitmap_path, trn_path,
-                          output / "new_england_flights_on_condor_map.png")
+    render_flight_line_overlay(segments, metadata, bitmap_path, trn_path,
+                               output / "new_england_flight_paths_over_relief_sectional.png")
+    render_heatmap_overlay(metadata, Path(args.crossing_grid), bitmap_path, trn_path,
+                           output / "new_england_heatmap_over_relief_sectional.png")
     render_all_tracks(segments, metadata, output / "new_england_all_flights.png")
     render_crossing_annotation(Path(args.crossing_map), metadata,
                                output / "new_england_crossings_annotated.png")
