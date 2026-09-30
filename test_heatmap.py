@@ -10,6 +10,7 @@ from new_england_heatmap import (
     load_state_geometries,
     rasterize_line,
 )
+from export_new_england_tracks import identity_from_key, qualifying_polyline
 
 
 class HeatmapTests(unittest.TestCase):
@@ -51,6 +52,16 @@ class HeatmapTests(unittest.TestCase):
         self.assertTrue(np.all(cols >= 0))
         self.assertTrue(np.all(rows < self.geography["height"]))
         self.assertTrue(np.all(cols < self.geography["width"]))
+
+    def test_export_identity_comes_from_storage_key(self):
+        self.assertEqual(identity_from_key(
+            "north-america-v1/data/raw_tracks/2024-06-12_12345.json.gz"),
+            ("2024-06-12", 12345))
+
+    def test_export_keeps_intersecting_track(self):
+        result = qualifying_polyline([(-72.7, 42.0), (-72.6, 43.0)], self.geography, 250)
+        self.assertIsNotNone(result)
+        self.assertGreaterEqual(len(result), 2)
 
 
 if __name__ == "__main__":
