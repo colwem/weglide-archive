@@ -47,6 +47,7 @@ jobs:
         run: >-
           python new_england_heatmap.py
           --prefix north-america-v1
+          --analysis-prefix analysis/new-england-heatmaps-v2
           --output heatmap-output
           --cell-km "${{ inputs.cell_km }}"
           --radius-km "${{ inputs.radius_km }}"

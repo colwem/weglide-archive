@@ -155,12 +155,19 @@ flight and grid cell, the score is `max(0, 1 - distance_km / 40)`. Contributions
 are summed across flights. A flight contributes at most once to a cell, so a
 track with dense GPS sampling receives no extra weight.
 
+State boundaries and coastlines use the U.S. Census Bureau's 2025 Cartographic
+Boundary Files at 1:500,000 scale. The official New England subset is kept in
+`data/cb_2025_new_england_states_500k.geojson`; calculation and rendering use
+the same reproducible geometry without downloading map data at runtime.
+
 The GitHub workflow has a 120-minute job limit and gives the computation 110
 minutes, leaving ten minutes for environment setup and artifact upload. R2 reads
 use parallel workers. Spatial work is cropped to each route's 40 km neighborhood and
 uses a Euclidean distance transform on the EPSG:5070 projected grid. The output
 contains a PNG map, compressed CSV grid, NumPy array, and JSON methodology/run
-manifest. Analysis state and the latest outputs are also written under
-`analysis/new-england-heatmap-v1/` in R2. If the fixed snapshot cannot be
+manifest. A second grid counts direct path crossings, one count per flight per
+crossed cell, and the output includes a side-by-side comparison. Analysis state
+and the latest outputs are also written under
+`analysis/new-england-heatmaps-v2/` in R2. If the fixed snapshot cannot be
 finished inside one computation budget, the next run resumes at the last saved
 batch without rescanning completed tracks.

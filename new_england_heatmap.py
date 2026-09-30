@@ -11,9 +11,9 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import time
-from typing import Iterable
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "weglide-matplotlib"))
 import matplotlib
@@ -21,42 +21,37 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import numpy as np
-from bokeh.sampledata.us_states import data as US_STATES
 from pyproj import Transformer
 from scipy.ndimage import distance_transform_edt
-from shapely.geometry import LineString, Polygon, box
+from shapely.geometry import LineString, box, shape
 from shapely.ops import transform, unary_union
 
 from r2_storage import client_and_bucket, key
 
 
 NEW_ENGLAND = ("CT", "RI", "MA", "VT", "NH", "ME")
-ANALYSIS_VERSION = 1
+BOUNDARY_PATH = Path(__file__).parent / "data" / "cb_2025_new_england_states_500k.geojson"
+BOUNDARY_SOURCE = "U.S. Census Bureau 2025 Cartographic Boundary Files, states, 1:500,000"
+ANALYSIS_VERSION = 3
 
 
-def split_rings(lons: Iterable[float], lats: Iterable[float]):
-    ring: list[tuple[float, float]] = []
-    for lon, lat in zip(lons, lats):
-        if not (math.isfinite(lon) and math.isfinite(lat)):
-            if len(ring) >= 3:
-                yield ring
-            ring = []
-        else:
-            ring.append((lon, lat))
-    if len(ring) >= 3:
-        yield ring
-
-
-def state_geometry(abbreviation: str):
-    record = US_STATES[abbreviation]
-    polygons = [Polygon(ring).buffer(0) for ring in split_rings(record["lons"], record["lats"])]
-    return unary_union([polygon for polygon in polygons if not polygon.is_empty])
+def load_state_geometries(path: Path = BOUNDARY_PATH):
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    states = {}
+    for feature in payload["features"]:
+        abbreviation = feature["properties"]["STUSPS"]
+        if abbreviation in NEW_ENGLAND:
+            states[abbreviation] = shape(feature["geometry"]).buffer(0)
+    missing = set(NEW_ENGLAND) - set(states)
+    if missing:
+        raise RuntimeError(f"Official boundary file is missing states: {sorted(missing)}")
+    return states
 
 
 def build_geography(cell_km: float, radius_km: float):
     forward = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
     reverse = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True)
-    states_lonlat = {abbr: state_geometry(abbr) for abbr in NEW_ENGLAND}
+    states_lonlat = load_state_geometries()
     new_england_lonlat = unary_union(list(states_lonlat.values()))
     states_xy = {abbr: transform(forward.transform, geometry) for abbr, geometry in states_lonlat.items()}
     new_england_xy = unary_union(list(states_xy.values()))
@@ -149,7 +144,8 @@ def rasterize_line(line, geography) -> tuple[np.ndarray, np.ndarray]:
     return (flat // width).astype(np.int32), (flat % width).astype(np.int32)
 
 
-def add_track_contribution(heat: np.ndarray, points, geography) -> bool:
+def add_track_contribution(distance_heat: np.ndarray, crossing_heat: np.ndarray,
+                           points, geography) -> bool:
     if len(points) < 2:
         return False
     longitudes = [point[0] for point in points]
@@ -169,16 +165,20 @@ def add_track_contribution(heat: np.ndarray, points, geography) -> bool:
     if len(rows) == 0:
         return False
 
+    # rasterize_line returns unique cells, so one flight adds exactly one count
+    # even if it contains dense fixes or loops repeatedly inside the same cell.
+    crossing_heat[rows, cols] += 1
+
     margin = int(math.ceil(geography["radius_m"] / geography["cell_m"])) + 1
     row0 = max(0, int(rows.min()) - margin)
-    row1 = min(heat.shape[0], int(rows.max()) + margin + 1)
+    row1 = min(distance_heat.shape[0], int(rows.max()) + margin + 1)
     col0 = max(0, int(cols.min()) - margin)
-    col1 = min(heat.shape[1], int(cols.max()) + margin + 1)
+    col1 = min(distance_heat.shape[1], int(cols.max()) + margin + 1)
     occupied = np.zeros((row1 - row0, col1 - col0), dtype=bool)
     occupied[rows - row0, cols - col0] = True
     distance_m = distance_transform_edt(~occupied, sampling=geography["cell_m"])
     contribution = np.maximum(0.0, 1.0 - distance_m / geography["radius_m"])
-    heat[row0:row1, col0:col1] += contribution.astype(np.float32)
+    distance_heat[row0:row1, col0:col1] += contribution.astype(np.float32)
     return True
 
 
@@ -199,10 +199,15 @@ def put_bytes(client, bucket: str, object_key: str, body: bytes, content_type: s
     client.put_object(Bucket=bucket, Key=object_key, Body=body, ContentType=content_type)
 
 
-def save_state(client, bucket: str, analysis_prefix: str, heat: np.ndarray, progress: dict) -> None:
+def save_state(client, bucket: str, analysis_prefix: str, distance_heat: np.ndarray,
+               crossing_heat: np.ndarray, progress: dict) -> None:
     buffer = io.BytesIO()
-    np.save(buffer, heat, allow_pickle=False)
-    put_bytes(client, bucket, key(analysis_prefix, "state/heat.npy"), buffer.getvalue(),
+    np.save(buffer, distance_heat, allow_pickle=False)
+    put_bytes(client, bucket, key(analysis_prefix, "state/distance_heat.npy"), buffer.getvalue(),
+              "application/octet-stream")
+    buffer = io.BytesIO()
+    np.save(buffer, crossing_heat, allow_pickle=False)
+    put_bytes(client, bucket, key(analysis_prefix, "state/crossing_heat.npy"), buffer.getvalue(),
               "application/octet-stream")
     put_bytes(client, bucket, key(analysis_prefix, "state/progress.json"),
               (json.dumps(progress, indent=2) + "\n").encode(), "application/json")
@@ -228,8 +233,9 @@ def get_bytes(client, bucket: str, object_key: str) -> bytes | None:
 def restore_state(client, bucket: str, analysis_prefix: str, parameters: dict):
     progress_body = get_bytes(client, bucket, key(analysis_prefix, "state/progress.json"))
     snapshot_body = get_bytes(client, bucket, key(analysis_prefix, "state/snapshot_keys.json.gz"))
-    heat_body = get_bytes(client, bucket, key(analysis_prefix, "state/heat.npy"))
-    if not (progress_body and snapshot_body and heat_body):
+    distance_body = get_bytes(client, bucket, key(analysis_prefix, "state/distance_heat.npy"))
+    crossing_body = get_bytes(client, bucket, key(analysis_prefix, "state/crossing_heat.npy"))
+    if not (progress_body and snapshot_body and distance_body and crossing_body):
         return None
     progress = json.loads(progress_body)
     if (progress.get("analysis_version") != ANALYSIS_VERSION
@@ -237,40 +243,42 @@ def restore_state(client, bucket: str, analysis_prefix: str, parameters: dict):
         print("Stored analysis uses different parameters; starting a fresh snapshot")
         return None
     keys = json.loads(gzip.decompress(snapshot_body))
-    heat = np.load(io.BytesIO(heat_body), allow_pickle=False)
+    distance_heat = np.load(io.BytesIO(distance_body), allow_pickle=False)
+    crossing_heat = np.load(io.BytesIO(crossing_body), allow_pickle=False)
     if progress.get("snapshot_count") != len(keys):
         raise RuntimeError("Stored heat-map snapshot count is inconsistent")
-    return keys, heat, progress
+    return keys, distance_heat, crossing_heat, progress
 
 
-def render_outputs(output: Path, heat: np.ndarray, geography, metadata: dict) -> None:
-    output.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(output / "new_england_heatmap.npz", heat=heat)
-    (output / "new_england_heatmap.json").write_text(
-        json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-
+def grid_coordinates(geography):
     x_centers = geography["min_x"] + (np.arange(geography["width"]) + 0.5) * geography["cell_m"]
     y_centers = geography["min_y"] + (np.arange(geography["height"]) + 0.5) * geography["cell_m"]
     xx, yy = np.meshgrid(x_centers, y_centers)
-    lon, lat = geography["reverse"].transform(xx, yy)
-    with gzip.open(output / "new_england_heatmap.csv.gz", "wt", encoding="utf-8") as handle:
-        handle.write("longitude,latitude,score\n")
-        for longitude, latitude, score in zip(lon.ravel(), lat.ravel(), heat.ravel()):
-            handle.write(f"{longitude:.6f},{latitude:.6f},{float(score):.6f}\n")
+    return geography["reverse"].transform(xx, yy)
 
-    positive = heat[heat > 0]
-    vmax = float(np.percentile(positive, 99.5)) if positive.size else 1.0
+
+def write_grid_csv(path: Path, grid: np.ndarray, geography, value_name: str) -> None:
+    lon, lat = grid_coordinates(geography)
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        handle.write(f"longitude,latitude,{value_name}\n")
+        for longitude, latitude, value in zip(lon.ravel(), lat.ravel(), grid.ravel()):
+            handle.write(f"{longitude:.6f},{latitude:.6f},{float(value):.6f}\n")
+
+
+def draw_map(ax, grid: np.ndarray, geography, title: str, subtitle: str,
+             colorbar_label: str, interpolation: str):
+    positive = grid[grid > 0]
     vmin = max(0.25, float(np.percentile(positive, 5))) if positive.size else 0.25
+    vmax = float(np.percentile(positive, 99.5)) if positive.size else 1.0
     if vmax <= vmin:
         vmax = vmin + 1.0
-    masked = np.ma.masked_less_equal(heat, 0)
-    fig, ax = plt.subplots(figsize=(10.5, 11), dpi=180)
+    masked = np.ma.masked_less_equal(grid, 0)
     ax.set_facecolor("#eef2f3")
     image = ax.imshow(masked, origin="lower",
                       extent=(geography["min_x"], geography["max_x"],
                               geography["min_y"], geography["max_y"]),
                       cmap="inferno", norm=LogNorm(vmin=vmin, vmax=vmax),
-                      interpolation="bilinear", alpha=0.88)
+                      interpolation=interpolation, alpha=0.88)
     for abbreviation, geometry in geography["states_xy"].items():
         parts = list(geometry.geoms) if hasattr(geometry, "geoms") else [geometry]
         for part in parts:
@@ -282,31 +290,76 @@ def render_outputs(output: Path, heat: np.ndarray, geography, metadata: dict) ->
                 fontsize=8, weight="bold", color="white",
                 bbox={"boxstyle": "round,pad=0.15", "facecolor": "#25343b", "alpha": 0.7,
                       "edgecolor": "none"})
-    colorbar = fig.colorbar(image, ax=ax, fraction=0.035, pad=0.02)
-    colorbar.set_label("Accumulated flight score (log color scale)")
-    ax.set_title("WeGlide flights passing through New England", fontsize=16, weight="bold", pad=14)
-    ax.text(0.5, 1.005,
-            f"{metadata['qualifying_flights']:,} flights · "
-            f"{metadata['parameters']['cell_km']:g} km cells · linear decay to zero at "
-            f"{metadata['parameters']['radius_km']:g} km",
-            transform=ax.transAxes, ha="center", va="bottom", fontsize=10)
-    ax.text(0.01, 0.01,
-            "Each flight contributes at most 1.0 per cell; GPS sample density does not add weight.",
-            transform=ax.transAxes, fontsize=8, color="#25343b",
+    colorbar = ax.figure.colorbar(image, ax=ax, fraction=0.035, pad=0.02)
+    colorbar.set_label(colorbar_label)
+    ax.set_title(title, fontsize=15, weight="bold", pad=14)
+    ax.text(0.5, 1.005, subtitle, transform=ax.transAxes,
+            ha="center", va="bottom", fontsize=9)
+    ax.text(0.01, 0.01, "Boundary: U.S. Census Bureau 2025, 1:500,000",
+            transform=ax.transAxes, fontsize=7.5, color="#25343b",
             bbox={"facecolor": "white", "alpha": 0.78, "edgecolor": "none", "pad": 3})
     ax.set_xlim(geography["min_x"], geography["max_x"])
     ax.set_ylim(geography["min_y"], geography["max_y"])
     ax.set_aspect("equal")
     ax.axis("off")
+
+
+def render_outputs(output: Path, distance_heat: np.ndarray, crossing_heat: np.ndarray,
+                   geography, metadata: dict) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(output / "new_england_distance_heatmap.npz", heat=distance_heat)
+    np.savez_compressed(output / "new_england_crossings_heatmap.npz", crossings=crossing_heat)
+    np.savez_compressed(output / "new_england_heatmaps.npz",
+                        distance_score=distance_heat, crossing_count=crossing_heat)
+    (output / "new_england_heatmap.json").write_text(
+        json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    write_grid_csv(output / "new_england_distance_heatmap.csv.gz", distance_heat,
+                   geography, "distance_score")
+    write_grid_csv(output / "new_england_crossings_heatmap.csv.gz", crossing_heat,
+                   geography, "crossing_flights")
+
+    common_subtitle = (f"{metadata['qualifying_flights']:,} flights · "
+                       f"{metadata['parameters']['cell_km']:g} km cells")
+    fig, ax = plt.subplots(figsize=(10.5, 11), dpi=180)
+    draw_map(ax, distance_heat, geography,
+             "WeGlide distance influence through New England",
+             common_subtitle + f" · linear decay to zero at {metadata['parameters']['radius_km']:g} km",
+             "Accumulated flight score (log color scale)", "bilinear")
     fig.tight_layout()
-    fig.savefig(output / "new_england_heatmap.png", bbox_inches="tight")
+    fig.savefig(output / "new_england_distance_heatmap.png", bbox_inches="tight")
     plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(10.5, 11), dpi=180)
+    draw_map(ax, crossing_heat, geography,
+             "WeGlide flight-path cell crossings through New England",
+             common_subtitle + " · one count per flight per crossed cell",
+             "Flights crossing cell (log color scale)", "nearest")
+    fig.tight_layout()
+    fig.savefig(output / "new_england_crossings_heatmap.png", bbox_inches="tight")
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 9.5), dpi=170)
+    draw_map(axes[0], distance_heat, geography, "Distance influence",
+             f"1.0 on track; zero at {metadata['parameters']['radius_km']:g} km",
+             "Accumulated score (log)", "bilinear")
+    draw_map(axes[1], crossing_heat, geography, "Direct cell crossings",
+             "One count per flight per crossed cell",
+             "Crossing flights (log)", "nearest")
+    fig.suptitle(f"WeGlide New England heat-map comparison · {common_subtitle}",
+                 fontsize=17, weight="bold")
+    fig.tight_layout()
+    fig.savefig(output / "new_england_heatmap_comparison.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # Preserve the original filename as the distance-decay product for existing links.
+    shutil.copyfile(output / "new_england_distance_heatmap.png",
+                    output / "new_england_heatmap.png")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", default="north-america-v1")
-    parser.add_argument("--analysis-prefix", default="analysis/new-england-heatmap-v1")
+    parser.add_argument("--analysis-prefix", default="analysis/new-england-heatmaps-v2")
     parser.add_argument("--output", default="heatmap-output")
     parser.add_argument("--cell-km", type=float, default=5.0)
     parser.add_argument("--radius-km", type=float, default=40.0)
@@ -323,19 +376,21 @@ def main() -> int:
     started_at = datetime.now(timezone.utc).isoformat()
     deadline = started + args.max_runtime_minutes * 60
     parameters = {"cell_km": args.cell_km, "radius_km": args.radius_km,
-                  "kernel": "linear_nearest_track", "new_england_states": list(NEW_ENGLAND)}
+                  "products": ["linear_nearest_track", "direct_cell_crossings"],
+                  "new_england_states": list(NEW_ENGLAND)}
     geography = build_geography(args.cell_km, args.radius_km)
     client, bucket = client_and_bucket()
 
     restored = None if args.fresh or args.max_objects else restore_state(
         client, bucket, args.analysis_prefix, parameters)
     if restored:
-        keys, heat, progress = restored
+        keys, distance_heat, crossing_heat, progress = restored
         next_index = int(progress["next_index"])
         qualifying = int(progress["qualifying_flights"])
         failures = int(progress["failed_objects"])
         started_at = progress["started_at"]
-        if heat.shape != (geography["height"], geography["width"]):
+        expected_shape = (geography["height"], geography["width"])
+        if distance_heat.shape != expected_shape or crossing_heat.shape != expected_shape:
             raise RuntimeError("Stored heat-map grid shape is inconsistent")
         print(f"Resuming fixed snapshot at {next_index:,}/{len(keys):,} objects")
     else:
@@ -344,7 +399,8 @@ def main() -> int:
             keys = keys[:args.max_objects]
         print(f"Snapshot contains {len(keys):,} raw track objects")
         save_snapshot(client, bucket, args.analysis_prefix, keys)
-        heat = np.zeros((geography["height"], geography["width"]), dtype=np.float32)
+        distance_heat = np.zeros((geography["height"], geography["width"]), dtype=np.float32)
+        crossing_heat = np.zeros((geography["height"], geography["width"]), dtype=np.uint32)
         next_index = qualifying = failures = 0
 
     # A fixed snapshot makes the result reproducible while collection continues.
@@ -361,14 +417,14 @@ def main() -> int:
                     object_key = futures.pop(future)
                     try:
                         _, points = future.result()
-                        if add_track_contribution(heat, points, geography):
+                        if add_track_contribution(distance_heat, crossing_heat, points, geography):
                             qualifying += 1
                     except Exception as exc:  # preserve useful partial output and a bounded run
                         failures += 1
                         print(f"Failed {object_key}: {type(exc).__name__}: {exc}")
         next_index = batch_start + len(batch)
         progress = checkpoint_payload(parameters, len(keys), next_index, qualifying, failures, started_at)
-        save_state(client, bucket, args.analysis_prefix, heat, progress)
+        save_state(client, bucket, args.analysis_prefix, distance_heat, crossing_heat, progress)
         elapsed = time.monotonic() - started
         rate = next_index / elapsed if elapsed else 0
         print(f"Processed {next_index:,}/{len(keys):,}; qualifying={qualifying:,}; "
@@ -385,10 +441,13 @@ def main() -> int:
         "score_definition": ("For each qualifying flight and cell: max(0, 1 - "
                              f"nearest_track_distance_km / {args.radius_km:g}). "
                              "Contributions are summed across flights."),
+        "crossing_definition": ("Each qualifying flight contributes exactly one count to each "
+                                "5 km cell touched by its rasterized path, and zero otherwise."),
         "projection": "EPSG:5070",
+        "boundary_source": BOUNDARY_SOURCE,
     })
-    render_outputs(Path(args.output), heat, geography, metadata)
-    save_state(client, bucket, args.analysis_prefix, heat, metadata)
+    render_outputs(Path(args.output), distance_heat, crossing_heat, geography, metadata)
+    save_state(client, bucket, args.analysis_prefix, distance_heat, crossing_heat, metadata)
     for path in Path(args.output).iterdir():
         content_type = "application/octet-stream"
         if path.suffix == ".png":
