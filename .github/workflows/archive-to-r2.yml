@@ -18,15 +18,14 @@ on:
         required: true
         default: "0"
         type: number
-      priority_area:
-        description: Takeoff region to download first within each day
+      collection_plan:
+        description: Complete New England history before the rest of North America
         required: true
-        default: northeast
+        default: new-england-first
         type: choice
         options:
-          - northeast
-          - ne-us
-          - na
+          - new-england-first
+          - north-america
       min_delay:
         description: Minimum randomized pause between flights in seconds
         required: true
@@ -57,7 +56,7 @@ jobs:
       ARCHIVE_PREFIX: north-america-v1
       COLLECT_RUNTIME_MINUTES: ${{ inputs.runtime_minutes || '330' }}
       COLLECT_MAX_FLIGHTS: ${{ inputs.max_flights || '0' }}
-      COLLECT_PRIORITY_AREA: ${{ inputs.priority_area || 'northeast' }}
+      COLLECT_PLAN: ${{ inputs.collection_plan || 'new-england-first' }}
       COLLECT_MIN_DELAY: ${{ inputs.min_delay || '4' }}
       COLLECT_MAX_DELAY: ${{ inputs.max_delay || '8' }}
     steps:
@@ -81,7 +80,7 @@ jobs:
             --visible --output archive --profile browser-profile \
             --max-runtime-minutes "$COLLECT_RUNTIME_MINUTES" \
             --max-flights "$COLLECT_MAX_FLIGHTS" \
-            --priority-area "$COLLECT_PRIORITY_AREA" \
+            --collection-plan "$COLLECT_PLAN" \
             --r2-sync-every-flights 20 --r2-prefix "$ARCHIVE_PREFIX" \
             --min-delay "$COLLECT_MIN_DELAY" --max-delay "$COLLECT_MAX_DELAY"
           status=$?

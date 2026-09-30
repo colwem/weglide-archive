@@ -29,11 +29,19 @@ stores the current day, not a fragile page number. If a run stops partway throug
 September 23, it queries September 23 again, skips completed IDs, finishes every
 page for that day, and only then advances to September 22.
 
-Within each North American day, takeoffs in the northeastern US and eastern
-Canada are downloaded first by default. This is a local priority because the
-site did not honor a combined multi-region query during live verification. It
-does not exclude the rest of North America. Use `--priority-area na` to retain
-the site's order without Northeast priority.
+The production plan has two strictly ordered historical phases. It first scans
+the entire date range for takeoffs in **New England only**: Connecticut, Rhode
+Island, Massachusetts, Vermont, New Hampshire, and Maine. New York, New Jersey,
+Pennsylvania, and Canada are not part of this phase. Only after that checkpoint
+reaches the oldest target date does the collector begin a separate pass for the
+rest of North America. Existing complete flight IDs are skipped, so the second
+pass does not download saved flights again. Each phase has its own SQLite
+checkpoint, preventing a restart from advancing to broader North America while
+New England is unfinished.
+
+The listing metadata exposes the takeoff-airport region, so this collection
+ordering is based on takeoff location. Flights that launch outside New England
+but later cross it are discovered during the broader North America phase.
 
 The local .venv has Playwright installed. It was created using the desktop
 app's bundled Python; recreating it with a normal installed Python is advisable
@@ -97,7 +105,7 @@ on every audit invocation.
 --max-runtime-minutes N  Stop cleanly after N minutes; 0 is unlimited
 --r2-sync-every-flights N  Publish every N new flights; 0 disables it
 --r2-prefix PREFIX    R2 object prefix (default north-america-v1)
---priority-area AREA Northeast priority (default northeast), or na
+--collection-plan PLAN  new-england-first (default), or north-america
 --restart-scan       Reset the saved day and rescan from --start-date
 --min-delay SECONDS  Minimum pause (default 4)
 --max-delay SECONDS  Maximum pause (default 8)

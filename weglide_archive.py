@@ -25,16 +25,22 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 START_URL = "https://www.weglide.org/flight/map?continent=North%2520America,NA"
 DETAIL_URL = "https://api.weglide.org/v1/flightdetail/{flight_id}"
 TRACK_URL = "https://api.weglide.org/v1/flightdata/{flight_id}"
-NE_US = ('US-CT', 'US-ME', 'US-MA', 'US-NH', 'US-RI', 'US-VT', 'US-NY', 'US-NJ', 'US-PA')
-EASTERN_CANADA = ('CA-ON', 'CA-QC', 'CA-NB', 'CA-NS', 'CA-PE', 'CA-NL')
+NEW_ENGLAND_REGIONS = ('US-CT', 'US-ME', 'US-MA', 'US-NH', 'US-RI', 'US-VT')
 
 
-def area_regions(area: str) -> tuple[str, ...]:
-    return () if area == 'na' else NE_US if area == 'ne-us' else NE_US + EASTERN_CANADA
+def collection_phases(plan: str) -> tuple[str, ...]:
+    return ('new-england', 'rest-na') if plan == 'new-england-first' else ('north-america',)
 
 
-def in_area(listing: dict[str, Any], regions: tuple[str, ...]) -> bool:
-    return not regions or nested(listing, 'takeoff_airport', 'region') in regions
+def in_collection_phase(listing: dict[str, Any], phase: str) -> bool:
+    region = nested(listing, 'takeoff_airport', 'region')
+    if phase == 'new-england':
+        return region in NEW_ENGLAND_REGIONS
+    if phase == 'rest-na':
+        return region not in NEW_ENGLAND_REGIONS
+    if phase == 'north-america':
+        return True
+    raise ValueError(f'Unknown collection phase: {phase}')
 
 
 @contextmanager
@@ -249,8 +255,16 @@ def open_database(path: Path) -> sqlite3.Connection:
     return db
 
 
+def checkpoint_scope(args: argparse.Namespace) -> str:
+    payload = {'continent': 'NA', 'oldest': args.stop_date}
+    phase = getattr(args, 'collection_phase', 'north-america')
+    if phase != 'north-america':
+        payload['phase'] = phase
+    return json.dumps(payload, sort_keys=True)
+
+
 def checkpoint(db: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    scope = json.dumps({'continent': 'NA', 'oldest': args.stop_date}, sort_keys=True)
+    scope = checkpoint_scope(args)
     row = db.execute('SELECT newest_date,"current_date",finished FROM checkpoints WHERE scope=?', (scope,)).fetchone()
     if row and not args.restart_scan:
         if args.start_date and args.start_date != row[0]:
@@ -264,6 +278,16 @@ def checkpoint(db: sqlite3.Connection, args: argparse.Namespace) -> dict[str, An
     state = dict(scope=scope, newest_date=newest, current_date=current, finished=finished)
     save_checkpoint(db, state)
     return state
+
+
+def phase_finished(root: Path, args: argparse.Namespace) -> bool:
+    db = open_database(root / 'index.sqlite3')
+    try:
+        row = db.execute('SELECT finished FROM checkpoints WHERE scope=?',
+                         (checkpoint_scope(args),)).fetchone()
+        return bool(row and row[0])
+    finally:
+        db.close()
 
 
 def save_checkpoint(db: sqlite3.Connection, state: dict[str, Any]) -> None:
@@ -524,7 +548,7 @@ async def launch_context(playwright: Any, profile: Path, headless: bool) -> Any:
         return await playwright.chromium.launch_persistent_context(**options)
 
 
-async def collect(args: argparse.Namespace) -> int:
+async def collect_phase(args: argparse.Namespace) -> int:
     from playwright.async_api import async_playwright
 
     root = Path(args.output).resolve()
@@ -538,7 +562,6 @@ async def collect(args: argparse.Namespace) -> int:
     downloaded = attempted = consecutive_errors = 0
     last_synced_downloaded = 0
     state = checkpoint(db, args)
-    priority_regions = area_regions(args.priority_area)
     deadline = (time.monotonic() + args.max_runtime_minutes * 60
                 if args.max_runtime_minutes else None)
 
@@ -561,8 +584,9 @@ async def collect(args: argparse.Namespace) -> int:
                     if dict(parse_qsl(urlsplit(list_template).query)).get("continent_id_in") != "NA":
                         raise ValueError("Observed listing lacks the expected North America filter")
                     if state['finished']:
-                        print("Saved date range is already complete. Use --restart-scan to rescan it.", flush=True)
+                        print(f"Saved {args.collection_phase} date range is already complete.", flush=True)
                         return 0
+                    print(f"Collection phase: {args.collection_phase}", flush=True)
                     current = date.fromisoformat(state['current_date'])
                     oldest = date.fromisoformat(args.stop_date)
                     listing_requests = 0
@@ -600,9 +624,12 @@ async def collect(args: argparse.Namespace) -> int:
                             if len(batch) < 100:
                                 break
                             offset += len(batch)
-                        listings.sort(key=lambda item: (not in_area(item, priority_regions), -int(item['id'])))
+                        listings = [item for item in listings
+                                    if in_collection_phase(item, args.collection_phase)]
+                        listings.sort(key=lambda item: -int(item['id']))
                         pending = [item for item in listings if not completed_flight(db, int(item['id']))]
-                        print(f"  {len(pending)} pending; Northeast-priority={args.priority_area != 'na'}", flush=True)
+                        print(f"  {len(listings)} selected for {args.collection_phase}; "
+                              f"{len(pending)} pending", flush=True)
                         for listing in pending:
                             if time_expired():
                                 print(f"Reached --max-runtime-minutes {args.max_runtime_minutes}; checkpoint remains on {day}.", flush=True)
@@ -688,6 +715,31 @@ async def collect(args: argparse.Namespace) -> int:
     return 0
 
 
+async def collect(args: argparse.Namespace) -> int:
+    """Run the requested phases in strict order under one total runtime budget."""
+    started = time.monotonic()
+    root = Path(args.output).resolve()
+    for phase in collection_phases(args.collection_plan):
+        phase_args = argparse.Namespace(**vars(args))
+        phase_args.collection_phase = phase
+        if args.max_runtime_minutes:
+            remaining = args.max_runtime_minutes - (time.monotonic() - started) / 60.0
+            if remaining <= 0:
+                print(f"Reached --max-runtime-minutes {args.max_runtime_minutes}; "
+                      f"{phase} remains queued.", flush=True)
+                return 0
+            phase_args.max_runtime_minutes = remaining
+        result = await collect_phase(phase_args)
+        if result != 0:
+            return result
+        if not phase_finished(root, phase_args):
+            # A runtime or flight limit stopped this phase. Never start the next
+            # phase until every date in this phase is durably complete.
+            return 0
+        print(f"Finished {phase}; advancing to the next collection phase.", flush=True)
+    return 0
+
+
 def inspect(args: argparse.Namespace) -> int:
     source = Path(args.file)
     with (gzip.open(source, "rt", encoding="utf-8") if source.suffix == ".gz"
@@ -731,8 +783,11 @@ def parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--r2-sync-every-flights", type=int, default=0,
                                 help="Publish an R2 checkpoint after this many new flights; 0 disables it")
     collect_parser.add_argument("--r2-prefix", default="north-america-v1")
-    collect_parser.add_argument("--priority-area", choices=("na", "ne-us", "northeast"), default="northeast",
-                                help="Download this takeoff region first within each day")
+    collect_parser.add_argument(
+        "--collection-plan", choices=("new-england-first", "north-america"),
+        default="new-england-first",
+        help=("Finish all CT/RI/MA/VT/NH/ME takeoffs across the full date range before "
+              "collecting the rest of North America"))
     collect_parser.add_argument("--restart-scan", action="store_true",
                                 help="Reset this date-range checkpoint and rescan from --start-date")
     collect_parser.add_argument("--min-delay", type=float, default=4)
