@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import gzip
 import json
 import mimetypes
 import os
@@ -216,15 +217,45 @@ def inventory(client, bucket: str, prefix: str) -> None:
             handle.write("\n".join(lines))
 
 
+def presign(client, bucket: str, prefix: str, output: Path, expires: int) -> None:
+    """Write resumable, read-only download URLs without exposing R2 credentials."""
+    base = prefix.strip("/") + "/"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    count = total_bytes = 0
+    with gzip.open(output, "wt", encoding="utf-8") as handle:
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=base):
+            for item in page.get("Contents", []):
+                object_key = item["Key"]
+                relative = object_key[len(base):]
+                url = client.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": bucket, "Key": object_key},
+                    ExpiresIn=expires,
+                )
+                handle.write(json.dumps({
+                    "path": relative,
+                    "size": item["Size"],
+                    "url": url,
+                }, separators=(",", ":")) + "\n")
+                count += 1
+                total_bytes += item["Size"]
+    print(json.dumps({"output": str(output), "objects": count,
+                      "bytes": total_bytes, "expires_seconds": expires}, indent=2))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("pull", "push", "check", "inventory"))
+    parser.add_argument("command", choices=("pull", "push", "check", "inventory", "presign"))
     parser.add_argument("--output", default="weglide_archive_data")
     parser.add_argument("--prefix", default="north-america-v1")
     parser.add_argument("--prune-uploaded", action="store_true",
                         help="Remove staged payload files only after the manifest is published")
     parser.add_argument("--recover-orphan-payloads", action="store_true",
                         help="With pull, cache unindexed raw/detail objects for request reuse")
+    parser.add_argument("--manifest-output", default="r2-download-manifest.jsonl.gz")
+    parser.add_argument("--expires", type=int, default=604800,
+                        help="Presigned URL lifetime in seconds (maximum seven days)")
     args = parser.parse_args()
     client, bucket = client_and_bucket()
     root = Path(args.output)
@@ -236,8 +267,10 @@ def main() -> int:
         push(client, bucket, args.prefix, root, args.prune_uploaded)
     elif args.command == "check":
         check(client, bucket, args.prefix)
-    else:
+    elif args.command == "inventory":
         inventory(client, bucket, args.prefix)
+    else:
+        presign(client, bucket, args.prefix, Path(args.manifest_output), args.expires)
     return 0
 
 

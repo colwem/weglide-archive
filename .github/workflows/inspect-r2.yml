@@ -2,6 +2,12 @@ name: Inspect R2 archive
 
 on:
   workflow_dispatch:
+    inputs:
+      create_download_manifest:
+        description: Create a seven-day read-only download manifest
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -24,3 +30,14 @@ jobs:
       - run: pip install -r requirements-storage.txt
       - name: Build read-only inventory
         run: python r2_storage.py inventory --prefix north-america-v1
+      - name: Create read-only download manifest
+        if: inputs.create_download_manifest
+        run: python r2_storage.py presign --prefix north-america-v1 --expires 604800
+      - name: Upload download manifest
+        if: inputs.create_download_manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: r2-download-manifest
+          path: r2-download-manifest.jsonl.gz
+          retention-days: 1
+          compression-level: 0
