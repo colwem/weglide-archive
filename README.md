@@ -145,3 +145,22 @@ final upload step publishes any remainder. The default runtime is 330 minutes.
 The existing archive contains old directories whose names end in .json or .csv
 and which hold .part files. They are preserved and are not indexed as complete.
 Do not mistake them for finished files.
+
+## New England route heat map
+
+`new_england_heatmap.py` reads a fixed snapshot of raw R2 tracks, selects every
+flight whose polyline intersects Connecticut, Rhode Island, Massachusetts,
+Vermont, New Hampshire, or Maine, and builds a 5 km grid. For each qualifying
+flight and grid cell, the score is `max(0, 1 - distance_km / 40)`. Contributions
+are summed across flights. A flight contributes at most once to a cell, so a
+track with dense GPS sampling receives no extra weight.
+
+The GitHub workflow has a 120-minute job limit and gives the computation 110
+minutes, leaving ten minutes for environment setup and artifact upload. R2 reads
+use parallel workers. Spatial work is cropped to each route's 40 km neighborhood and
+uses a Euclidean distance transform on the EPSG:5070 projected grid. The output
+contains a PNG map, compressed CSV grid, NumPy array, and JSON methodology/run
+manifest. Analysis state and the latest outputs are also written under
+`analysis/new-england-heatmap-v1/` in R2. If the fixed snapshot cannot be
+finished inside one computation budget, the next run resumes at the last saved
+batch without rescanning completed tracks.
