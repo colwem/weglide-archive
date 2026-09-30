@@ -59,8 +59,11 @@ def write_bundle(path: Path, tracks: list[tuple[str, int, np.ndarray]], snapshot
         "snapshot_count": snapshot_count,
         "qualifying_flights": len(tracks),
         "failed_objects": failed_objects,
-        "date_start": str(dates.min()) if len(dates) else None,
-        "date_end": str(dates.max()) if len(dates) else None,
+        # NumPy 2.x has no minimum/maximum ufunc loop for Unicode arrays.
+        # Tracks are sorted lexicographically by ISO date above, so read the
+        # range from the sorted Python records.
+        "date_start": tracks[0][0] if tracks else None,
+        "date_end": tracks[-1][0] if tracks else None,
         "coordinate_count": int(len(coordinates)),
         "simplification_metres": simplify_m,
         "runtime_seconds": runtime_seconds,

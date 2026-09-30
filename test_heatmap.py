@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
@@ -10,7 +13,7 @@ from new_england_heatmap import (
     load_state_geometries,
     rasterize_line,
 )
-from export_new_england_tracks import identity_from_key, qualifying_polyline
+from export_new_england_tracks import identity_from_key, qualifying_polyline, write_bundle
 
 
 class HeatmapTests(unittest.TestCase):
@@ -62,6 +65,19 @@ class HeatmapTests(unittest.TestCase):
         result = qualifying_polyline([(-72.7, 42.0), (-72.6, 43.0)], self.geography, 250)
         self.assertIsNotNone(result)
         self.assertGreaterEqual(len(result), 2)
+
+    def test_export_metadata_uses_sorted_iso_date_range(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "tracks.npz"
+            coordinates = np.asarray([[-72.0, 42.0], [-71.0, 43.0]], dtype=np.float32)
+            metadata = write_bundle(path, [
+                ("2026-09-30", 2, coordinates),
+                ("2018-04-12", 1, coordinates),
+            ], 2, 0, 250.0, 1.0)
+            self.assertEqual((metadata["date_start"], metadata["date_end"]),
+                             ("2018-04-12", "2026-09-30"))
+            self.assertEqual(json.loads(path.with_suffix(".json").read_text())["date_start"],
+                             "2018-04-12")
 
 
 if __name__ == "__main__":
