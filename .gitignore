@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
+.mplconfig/
 
 # The public repository contains collector code, never downloaded flight data.
 weglide_archive_data*/
