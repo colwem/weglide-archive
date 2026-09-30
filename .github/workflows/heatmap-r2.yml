@@ -1,0 +1,62 @@
+name: Build New England heat map
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_runtime_minutes:
+        description: Hard computation budget; leaves time for setup and artifact upload
+        required: true
+        default: "110"
+        type: number
+      cell_km:
+        description: Output grid cell size in kilometers
+        required: true
+        default: "5"
+        type: number
+      radius_km:
+        description: Distance where a flight contribution reaches zero
+        required: true
+        default: "40"
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weglide-new-england-heatmap
+  cancel-in-progress: false
+
+jobs:
+  heatmap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-heatmap.txt
+      - run: pip install -r requirements-heatmap.txt
+      - name: Build distance-decay heat map
+        run: >-
+          python new_england_heatmap.py
+          --prefix north-america-v1
+          --analysis-prefix analysis/new-england-heatmaps-v2
+          --output heatmap-output
+          --cell-km "${{ inputs.cell_km }}"
+          --radius-km "${{ inputs.radius_km }}"
+          --max-runtime-minutes "${{ inputs.max_runtime_minutes }}"
+      - name: Upload review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-england-heatmap
+          path: heatmap-output/
+          if-no-files-found: error
+          retention-days: 14
